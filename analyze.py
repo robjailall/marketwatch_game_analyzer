@@ -55,9 +55,9 @@ def _reduce_stack(stack, quantity):
     return basis
 
 
-def _calculate_running_portfolio_value(transactions, starting_total=100_000.00, debug=False):
+def _calculate_running_portfolio_value(transactions, starting_amount=100_000.00, debug=False):
     user_totals = defaultdict(
-        lambda: dict(running_cash_total=starting_total,
+        lambda: dict(running_cash_total=starting_amount,
                      running_portfolio_value=0,
                      running_short=0.0,
                      shorted_stack=defaultdict(lambda: []),
@@ -129,7 +129,7 @@ def _calculate_running_portfolio_value(transactions, starting_total=100_000.00, 
     return final_transactions
 
 
-def print_user_portfolios_csv(transactions_with_totals, f):
+def print_user_portfolios_csv(transactions_with_totals, f, starting_total=100_000.00):
     user_names = {}
     idx = 0
     for t in transactions_with_totals:
@@ -140,7 +140,8 @@ def print_user_portfolios_csv(transactions_with_totals, f):
     rows = []
     last_row = {"date": t.trx_date, "user": None, "type": None, "price": None, "quantity": None}
     for u in user_names:
-        last_row[u] = 0.0
+        last_row[u] = starting_total
+
     for t in transactions_with_totals:
         last_row["date"] = t.trx_date
         last_row[t.user] = t.total_portfolio
@@ -153,8 +154,9 @@ def print_user_portfolios_csv(transactions_with_totals, f):
         rows.append(last_row.copy())
 
     writer = DictWriter(f=f,
-                        fieldnames=["date"] + list(user_names.keys()) + ["user", "symbol", "type", "price", "quantity",
-                                                                         "total"],
+                        fieldnames=["date"]
+                                   + list(user_names.keys())
+                                   + ["user", "symbol", "type", "price", "quantity", "total"],
                         extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
@@ -204,7 +206,7 @@ def _read_symbols_to_set(filename):
     return symbols
 
 
-def main(portfolio_transactions_directory: str, bans_file: str = None, output_dir=None,
+def main(portfolio_transactions_directory: str, bans_file: str = None, starting_amount=100_000,
          debug=False):
     transactions = []
 
@@ -217,23 +219,25 @@ def main(portfolio_transactions_directory: str, bans_file: str = None, output_di
             parse_marketwatch_transaction_history(filename=fn, debug=debug,
                                                   exclude_symbols=exclude_symbols))
 
-    transactions_with_totals = _calculate_running_portfolio_value(transactions, debug=debug)
+    transactions_with_totals = _calculate_running_portfolio_value(transactions, starting_amount=starting_amount,
+                                                                  debug=debug)
 
-    print_user_portfolios_csv(transactions_with_totals=transactions_with_totals, f=sys.stdout)
+    print_user_portfolios_csv(transactions_with_totals=transactions_with_totals, f=sys.stdout,
+                              starting_total=starting_amount)
 
 
 if __name__ == "__main__":
     setlocale(LC_NUMERIC, "en_US.UTF-8")
     parser = ArgumentParser()
     parser.add_argument("input_dir", type=str, default=None,
-                        help="Directory with CSV exports of portfolio transactions")
+                        help="Directory with CSV exports of Portfolio Transactions")
     parser.add_argument("--debug", action="store_true", default=False)
-    parser.add_argument("--output-dir", type=str, default=None, help="Script will save tab-separated files here")
     parser.add_argument("--bans", type=str, default=None,
                         help="File with a list of banned stocks")
+    parser.add_argument("--starting-amount", type=float, default=100_000)
 
     args = parser.parse_args()
-    main(output_dir=args.output_dir,
-         portfolio_transactions_directory=args.input_dir,
+    main(portfolio_transactions_directory=args.input_dir,
          bans_file=args.bans,
+         starting_amount=args.starting_amount,
          debug=args.debug)
