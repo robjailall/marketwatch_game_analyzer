@@ -138,15 +138,24 @@ def print_user_portfolios_csv(transactions_with_totals, f):
             idx += 1
 
     rows = []
-    last_row = {"date": t.trx_date}
+    last_row = {"date": t.trx_date, "user": None, "type": None, "price": None, "quantity": None}
     for u in user_names:
         last_row[u] = 0.0
     for t in transactions_with_totals:
         last_row["date"] = t.trx_date
         last_row[t.user] = t.total_portfolio
+        last_row["user"] = t.user
+        last_row["symbol"] = t.symbol
+        last_row["type"] = t.trx_type
+        last_row["price"] = t.price
+        last_row["quantity"] = t.quantity
+        last_row["total"] = t.price * t.quantity
         rows.append(last_row.copy())
 
-    writer = DictWriter(f=f, fieldnames=["date"] + list(user_names.keys()), extrasaction="ignore")
+    writer = DictWriter(f=f,
+                        fieldnames=["date"] + list(user_names.keys()) + ["user", "symbol", "type", "price", "quantity",
+                                                                         "total"],
+                        extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
 
