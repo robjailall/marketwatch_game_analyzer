@@ -1,12 +1,12 @@
 import csv
 import datetime
-import os
 import glob
-import typing
+import sys
 from argparse import ArgumentParser
+from collections import defaultdict
+from csv import DictWriter
 from datetime import datetime
 from locale import atof, setlocale, LC_NUMERIC
-from collections import defaultdict
 
 
 class Transaction(object):
@@ -18,6 +18,7 @@ class Transaction(object):
         self.price = price
         self.excluded = excluded
         self.user = user
+        self.total_portfolio = 0.0
 
     def key(item):
         type_map = {
@@ -58,23 +59,26 @@ def _calculate_running_portfolio_value(transactions, starting_total=100_000.00, 
     user_totals = defaultdict(
         lambda: dict(running_cash_total=starting_total,
                      running_portfolio_value=0,
-                     # running_margin=0.0,
                      running_short=0.0,
                      shorted_stack=defaultdict(lambda: []),
                      purchased_stack=defaultdict(lambda: []),
                      quantity=defaultdict(lambda: 0.0),
-                     short_quantity=defaultdict(lambda: 0.0),
                      last_price=defaultdict(lambda: 0.0)))
 
     transactions_sorted = sorted(transactions, key=Transaction.key)
 
+    final_transactions = []
+
     for t in transactions_sorted:
+
+        if t.excluded:
+            continue
+
         before_cash = user_totals[t.user]["running_cash_total"]
         after_cash = before_cash
 
         before_portfolio = user_totals[t.user]["running_portfolio_value"]
         after_portfolio = before_portfolio
-        # after_margin = user_totals[t.user]["running_margin"]
         after_short_cash = user_totals[t.user]["running_short"]
 
         if t.trx_type in ("sell"):
@@ -109,20 +113,42 @@ def _calculate_running_portfolio_value(transactions, starting_total=100_000.00, 
         t.after_cash = after_cash
         t.before_portfolio = before_portfolio
         t.after_portfolio = after_portfolio
-        # t.after_margin = after_margin
         t.after_short_cash = after_short_cash
         t.total_portfolio = after_cash + after_portfolio + after_short_cash
 
         user_totals[t.user]["running_cash_total"] = after_cash
         user_totals[t.user]["running_portfolio_value"] = after_portfolio
-        # user_totals[t.user]["running_margin"] = after_margin
         user_totals[t.user]["running_short"] = after_short_cash
 
         if debug:
             print(Transaction.key(t), t.after_cash, t.after_portfolio, t.after_short_cash,
                   t.total_portfolio)
 
-    return transactions
+        final_transactions.append(t)
+
+    return final_transactions
+
+
+def print_user_portfolios_csv(transactions_with_totals, f):
+    user_names = {}
+    idx = 0
+    for t in transactions_with_totals:
+        if t.user not in user_names:
+            user_names[t.user] = idx
+            idx += 1
+
+    rows = []
+    last_row = {"date": t.trx_date}
+    for u in user_names:
+        last_row[u] = 0.0
+    for t in transactions_with_totals:
+        last_row["date"] = t.trx_date
+        last_row[t.user] = t.total_portfolio
+        rows.append(last_row.copy())
+
+    writer = DictWriter(f=f, fieldnames=["date"] + list(user_names.keys()), extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
 
 
 def _symbol_included(text, exclude_symbols):
@@ -169,7 +195,7 @@ def _read_symbols_to_set(filename):
     return symbols
 
 
-def main(portfolio_transactions_directory: str, bans_file: str = None, output_dir=None, include_symbols_filename=None,
+def main(portfolio_transactions_directory: str, bans_file: str = None, output_dir=None,
          debug=False):
     transactions = []
 
@@ -181,9 +207,10 @@ def main(portfolio_transactions_directory: str, bans_file: str = None, output_di
         transactions.extend(
             parse_marketwatch_transaction_history(filename=fn, debug=debug,
                                                   exclude_symbols=exclude_symbols))
-        break
 
-    _calculate_running_portfolio_value(transactions, debug=debug)
+    transactions_with_totals = _calculate_running_portfolio_value(transactions, debug=debug)
+
+    print_user_portfolios_csv(transactions_with_totals=transactions_with_totals, f=sys.stdout)
 
 
 if __name__ == "__main__":
