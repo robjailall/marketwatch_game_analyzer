@@ -1,0 +1,203 @@
+import csv
+import datetime
+import os
+import glob
+import typing
+from argparse import ArgumentParser
+from datetime import datetime
+from locale import atof, setlocale, LC_NUMERIC
+from collections import defaultdict
+
+
+class Transaction(object):
+    def __init__(self, user, symbol, trx_type, trx_date, quantity, price, excluded):
+        self.symbol = symbol
+        self.trx_type = trx_type
+        self.trx_date = trx_date
+        self.quantity = quantity
+        self.price = price
+        self.excluded = excluded
+        self.user = user
+
+    def key(item):
+        type_map = {
+            "buy": "0 buy",
+            "sell": "1 sell",
+            "short": "2 short",
+            "cover": "3 cover"
+        }
+        return (item.trx_date, item.user, item.symbol, type_map[item.trx_type], item.quantity, item.price)
+
+
+def num(num_str):
+    num_str = num_str.replace("$", "")
+    if num_str in ("", "-"):
+        return 0.0
+    elif "(" in num_str:
+        return atof(num_str.replace("(", "").replace(")", ""))
+    else:
+        return atof(num_str)
+
+
+def _reduce_stack(stack, quantity):
+    amount_left = quantity
+    basis = 0
+    while amount_left > 0:
+        if amount_left > stack[-1][0]:
+            basis += stack[-1][0] * stack[-1][1]
+            amount_left -= stack[-1][0]
+            stack.pop()
+        else:
+            basis += amount_left * stack[-1][1]
+            stack[-1][0] -= amount_left
+            amount_left = 0
+    return basis
+
+
+def _calculate_running_portfolio_value(transactions, starting_total=100_000.00, debug=False):
+    user_totals = defaultdict(
+        lambda: dict(running_cash_total=starting_total,
+                     running_portfolio_value=0,
+                     # running_margin=0.0,
+                     running_short=0.0,
+                     shorted_stack=defaultdict(lambda: []),
+                     purchased_stack=defaultdict(lambda: []),
+                     quantity=defaultdict(lambda: 0.0),
+                     short_quantity=defaultdict(lambda: 0.0),
+                     last_price=defaultdict(lambda: 0.0)))
+
+    transactions_sorted = sorted(transactions, key=Transaction.key)
+
+    for t in transactions_sorted:
+        before_cash = user_totals[t.user]["running_cash_total"]
+        after_cash = before_cash
+
+        before_portfolio = user_totals[t.user]["running_portfolio_value"]
+        after_portfolio = before_portfolio
+        # after_margin = user_totals[t.user]["running_margin"]
+        after_short_cash = user_totals[t.user]["running_short"]
+
+        if t.trx_type in ("sell"):
+            after_cash += t.quantity * t.price
+
+            cost_basis = _reduce_stack(user_totals[t.user]["purchased_stack"][t.symbol], t.quantity)
+
+            # adjust portfolio for still held stocks
+            after_portfolio += (t.price - user_totals[t.user]["last_price"][t.symbol]) * \
+                               (user_totals[t.user]["quantity"][t.symbol] - t.quantity)
+
+            # adjust portfolio for things being sold
+            after_portfolio -= cost_basis
+            user_totals[t.user]["quantity"][t.symbol] -= t.quantity
+            user_totals[t.user]["last_price"][t.symbol] = t.price
+        elif t.trx_type in ("buy"):
+            after_cash -= t.quantity * t.price
+
+            user_totals[t.user]["purchased_stack"][t.symbol].append([t.quantity, t.price])
+
+            user_totals[t.user]["quantity"][t.symbol] += t.quantity
+            user_totals[t.user]["last_price"][t.symbol] = t.price
+            after_portfolio += t.quantity * t.price
+        if t.trx_type in ("short"):
+            user_totals[t.user]["shorted_stack"][t.symbol].append([t.quantity, t.price])
+
+        elif t.trx_type in ("cover"):
+            cost_basis = _reduce_stack(user_totals[t.user]["shorted_stack"][t.symbol], t.quantity)
+            after_short_cash += cost_basis - (t.quantity * t.price)
+
+        t.before_cash = before_cash
+        t.after_cash = after_cash
+        t.before_portfolio = before_portfolio
+        t.after_portfolio = after_portfolio
+        # t.after_margin = after_margin
+        t.after_short_cash = after_short_cash
+        t.total_portfolio = after_cash + after_portfolio + after_short_cash
+
+        user_totals[t.user]["running_cash_total"] = after_cash
+        user_totals[t.user]["running_portfolio_value"] = after_portfolio
+        # user_totals[t.user]["running_margin"] = after_margin
+        user_totals[t.user]["running_short"] = after_short_cash
+
+        if debug:
+            print(Transaction.key(t), t.after_cash, t.after_portfolio, t.after_short_cash,
+                  t.total_portfolio)
+
+    return transactions
+
+
+def _symbol_included(text, exclude_symbols):
+    if exclude_symbols:
+        for symbol in exclude_symbols:
+            if symbol.upper() in text.upper():
+                return False
+    return True
+
+
+def parse_marketwatch_transaction_history(filename, exclude_symbols, debug=False):
+    transactions = []
+
+    # Portfolio Transactions - Rob Jay.csv
+    user = filename.split("-")[1].strip()[0:-4].lower()
+
+    with open(filename) as f:
+        reader = csv.reader(f)
+        next(reader)  # header
+        for row in reader:
+            symbol = row[0]
+            excluded = False
+            if not _symbol_included(symbol, exclude_symbols):
+                excluded = True
+                if debug:
+                    print("Excluding ", symbol)
+
+            trx_type = row[3].lower()
+            trx_date = datetime.strptime("{}m".format(row[2].strip()), "%m/%d/%y %I:%M%p")
+            quantity = atof(row[5])
+            price = atof(row[6].replace("$", ""))
+
+            transactions.append(Transaction(user, symbol, trx_type, trx_date, quantity, price, excluded))
+    return transactions
+
+
+def _read_symbols_to_set(filename):
+    symbols = None
+    if filename:
+        symbols = set([])
+        with open(filename) as f:
+            for l in f:
+                symbols.add(l.strip())
+    return symbols
+
+
+def main(portfolio_transactions_directory: str, bans_file: str = None, output_dir=None, include_symbols_filename=None,
+         debug=False):
+    transactions = []
+
+    exclude_symbols = _read_symbols_to_set(bans_file)
+
+    transaction_history_files = glob.glob("{}/Portfolio Transactions*.csv".format(portfolio_transactions_directory))
+
+    for fn in transaction_history_files:
+        transactions.extend(
+            parse_marketwatch_transaction_history(filename=fn, debug=debug,
+                                                  exclude_symbols=exclude_symbols))
+        break
+
+    _calculate_running_portfolio_value(transactions, debug=debug)
+
+
+if __name__ == "__main__":
+    setlocale(LC_NUMERIC, "en_US.UTF-8")
+    parser = ArgumentParser()
+    parser.add_argument("input_dir", type=str, default=None,
+                        help="Directory with CSV exports of portfolio transactions")
+    parser.add_argument("--debug", action="store_true", default=False)
+    parser.add_argument("--output-dir", type=str, default=None, help="Script will save tab-separated files here")
+    parser.add_argument("--bans", type=str, default=None,
+                        help="File with a list of banned stocks")
+
+    args = parser.parse_args()
+    main(output_dir=args.output_dir,
+         portfolio_transactions_directory=args.input_dir,
+         bans_file=args.bans,
+         debug=args.debug)
